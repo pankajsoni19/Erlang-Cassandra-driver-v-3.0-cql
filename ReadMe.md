@@ -10,6 +10,7 @@ Features
 2. Load balancing, and node discovery on the cassandra cluter
 3. Reconnect on node loss
 4. This is the sync version, async version is private for now.
+5. Supports password authenticator
 
 Contributors
 ------------------------
