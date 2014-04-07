@@ -19,26 +19,32 @@
 %% Supervisor callbacks
 -export([init/1, start_link/1]).
 
+-export([stop/0]).
+
 -record(cass_pool, {sync, pid}).
 
 %% ===================================================================
 %% API functions
 %% ===================================================================
-%% ["192.168.1.48",9042,"verbus","verbus",10,10,true]
 
-start_link([Host,Port, UserName, Password, PoolSize,StartInterval,false]) ->
+start_link([_Host, _Port, _UserName, _Password, _PoolSize, _StartInterval, false]) ->
 	{error, not_supported_in_this_version};
 	
 start_link([Host,Port, User, Pass, PoolSize,StartInterval,Sync]) ->
 	UserName = erlang:list_to_binary(User), 
 	Password = erlang:list_to_binary(Pass),
-    mnesia:create_table(cass_pool,
-			[{ram_copies, [node()]}, {type, bag},
-			 {local_content, true},
-			 {attributes, record_info(fields, cass_pool)}]),
-	ets:new(cass_pool_counter, [named_table, public]),
-	ets:insert(cass_pool_counter, {cass_pool, 1}),
-    supervisor:start_link({local, ?MODULE}, ?MODULE, [Host,Port, UserName, Password, PoolSize,StartInterval,Sync]).
+	mnesia:create_table(cass_pool,
+		[{ram_copies, [node()]}, {type, bag},
+		 {local_content, true},
+		 {attributes, record_info(fields, cass_pool)}]),
+	case ets:info(cass_pool_counter) of
+		undefined ->	
+		   ets:new(cass_pool_counter, [named_table, public]),
+		   ets:insert(cass_pool_counter, {cass_pool, 1}),
+		   supervisor:start_link({local, ?MODULE}, ?MODULE, [Host,Port, UserName, Password, PoolSize,StartInterval,Sync]);
+		_ ->
+		  ok
+	end.
 
 q(Query) -> q(Query, <<2>> , one, ?CASS_QUERY_DEF_TIMEOUT).
 
@@ -73,7 +79,7 @@ get_round_robin_pid(Key) ->
 
 get_pool_size(Key) ->
 	Rs = mnesia:dirty_read(cass_pool, Key),
-   	Size = length(Rs).
+   	length(Rs).
 
 add_pid(Key, Pid) ->
     F = fun () ->
@@ -87,3 +93,13 @@ remove_pid(Key, Pid) ->
 	end,
     mnesia:ets(F).	
 
+stop() ->
+ stop_sync(),
+ ok. 
+
+stop_sync() ->
+  Rs = mnesia:dirty_read(cass_pool, ?SYNC),
+  lists:foreach(fun(R) -> 
+       gen_fsm:send_all_state_event(R#cass_pool.pid, stop_now)
+   end, Rs),
+   ok.

@@ -72,7 +72,7 @@ start_link(Host, Port, UserName, Password, PoolSize, StartInterval ,I) ->
 
 
 %%    [Server, Port, User, Pass, _PoolSize, SyncMode] = db_opts(Host),
-connecting({reconnect, Rows}, #state{host = Host, port = Port} = State) ->
+connecting({reconnect, Rows}, #state{host = _Host, port = _Port} = State) ->
 	case catch lists:foldl(fun([{_,RpcAddr}], Acc) ->  [RpcAddr|Acc] end, [], Rows) of
 			PeerList when is_list(PeerList), erlang:length(PeerList) > 1 ->
 	        PoolSize = ecql_sup:get_pool_size(true),
@@ -85,7 +85,7 @@ connecting({reconnect, Rows}, #state{host = Host, port = Port} = State) ->
 						Index = ceiling(State#state.proc_index / ConnectionPerNode),
 						lists:nth(Index, PeerList)
 				end,
-				do_connection(?RES_DISCOVER_STREAMID,PeerList,State);
+				do_connection(?RES_DISCOVER_STREAMID,PeerList,State#state{host = Server});
 		_ ->
 		    check_state(?RES_DISCOVER_STREAMID, State)
 	end;
@@ -101,7 +101,7 @@ connecting(discover, State) ->
 				{next_state, connecting, State}
 	end; 
 
-connecting(connect, #state{host = Host} = State) ->
+connecting(connect, #state{host = _Host} = State) ->
     ?INFO_MSG("Starting cassandra connection in sync mode: ~p ~n",[true]),
 	do_connection(?RES_STREAMID_START,State);
         
@@ -141,7 +141,7 @@ session_established(Request, From, State) ->
 %%% gen fsm   
 %%--------------------------------------------------------------------   
 
-init([Host,Port, UserName, Password, PoolSize,StartInterval,I])  ->
+init([Host,Port, UserName, Password, _PoolSize,StartInterval,I])  ->
      ?INFO_MSG("Cassandra connection can be only, async or sync mode. To switch modes restart with new settings.~n",[]),
      if I > 0 -> 
             Interval = I * 1000,
@@ -157,6 +157,9 @@ init([Host,Port, UserName, Password, PoolSize,StartInterval,I])  ->
                 	proc_index = I},
     {ok,connecting,State}.
     
+handle_event(stop_now, _StateName, State) ->
+        {stop, normal, State};
+
 handle_event(_Event, StateName, State) ->
         {next_state, StateName, State}.
 
@@ -199,7 +202,6 @@ handle_info({tcp, Sock, Data}, St, State = #state{sock=Sock, buffer=Buffer}) ->
             inet:setopts(Sock, [{active, once}]),
             {next_state, St, State#state{buffer=NewBuf}};
         {F=#frame{}, NewBuf} ->
-            %io:format("got frame: ~p\n",[F]),
             inet:setopts(Sock, [{active, once}]),
             handle_frame(St, F, State#state{buffer=NewBuf})
     end;
@@ -273,7 +275,7 @@ check_error_type(Server, Port, StreamId, PeerList, State, Tries) ->
 		?RES_DISCOVER_STREAMID ->
 			Pl = lists:subtract(PeerList, Server),
 			Sip = lists:nth(erlang:phash(now(), length(Pl)), Pl),
-			do_connection(StreamId, Pl, State, Tries-1);
+			do_connection(StreamId, Pl, State#state{host = Sip}, Tries-1);
 		?RES_STREAMID_START->
 			do_connection(StreamId, PeerList, State, Tries-1)
 	end.
@@ -286,37 +288,6 @@ ceiling(X) ->
         _ -> T
     end.
 
-update_ordsets_element(StreamId,State) ->
-       Data = State#state.pending_requests,
-       case ordsets:fold(fun({Ix,Pd},Acc) -> 
-                    case StreamId of
-                       Ix ->
-                           {Ix,Pd};     
-                       _ -> 
-                          Acc      
-                    end    
-                end,{},Data) of
-              {} -> error;
-              Element ->              
-                     {Element, ordsets:del_element(Element,Data)}
-       end.
-       
-get_async_index(State) ->
-        Data = State#state.pending_requests,
-        PendingReq = ordsets:size(Data),
-        if PendingReq < ?MAX_Q_LEN ->
-         {ok,Ix} = ordsets:fold(fun({Num, _},{_, Acc}) -> 
-                                case Acc of 
-                                        Num -> Acc + 1; 
-                                        Acc when is_integer(Acc) -> {ok,Acc}; 
-                                        _ -> Acc 
-                                end 
-                             end,{ok, 1},Data),
-                   Ix;              
-        true ->
-               queue_full
-        end.
-
 do_close(State) ->
 	?SUP:remove_pid(?SYNC, self()),
 	gen_tcp:close(State#state.sock),
@@ -327,9 +298,7 @@ do_close(State) ->
 	State#state{sock = undefined, pending_requests = undefined, caller = undefined}.
 
 sock_send(Sock, F=#frame{}) ->
-    %io:format("sock_send: ~p\n",[F]),
     Enc = ecql_parser:encode(F),
-    %io:format("SEND: ~p\n",[iolist_to_binary(Enc)]),
     case gen_tcp:send(Sock, Enc) of
             {error,timeout} -> ok;
             {error,_Reason} -> error;
@@ -476,9 +445,9 @@ send_reply(From,Reply) when is_pid(From)->
 send_reply({From, Tag},Reply) when is_pid(From) ->
     catch From ! {Tag, Reply}.
 
-send_reply(Reply, State ,StreamId) ->
+send_reply(Reply, State , _StreamId) ->
     (?GEN_FSM):reply(State#state.caller, Reply),
-            check_queue(State).
+     check_queue(State).
 
 check_queue(State) ->  
     case queue:len(State#state.pending_requests) of      

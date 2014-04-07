@@ -9,6 +9,6 @@
 				  sasl,
 				  mnesia
                  ]},
-  {mod, { ecql_app, ["192.168.1.48",9042,"verbus","verbus",1,10,true]}},
+  {mod, { ecql_app, ["SERVERIP",9042,"USERNAME", "PASSWORD",1,10,true]}},
   {env, []}
  ]}.

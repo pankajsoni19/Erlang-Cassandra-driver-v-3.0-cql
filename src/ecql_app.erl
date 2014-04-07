@@ -18,5 +18,5 @@ start(_StartType, StartArgs) ->
     ecql_sup:start_link(StartArgs).
 
 stop(_State) ->
-	application:stop(mnesia),
-    ok.
+   ecql_sup:stop(),
+   ok.
