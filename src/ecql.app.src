@@ -9,6 +9,6 @@
 				  sasl,
 				  mnesia
                  ]},
-  {mod, { ecql_app, ["SERVERIP",9042,"USERNAME", "PASSWORD",1,10,true]}},
+  {mod, { ecql_app, ["SERVERIP",9042,"USERNAME", "PASSWORD",10,10,true]}},
   {env, []}
  ]}.

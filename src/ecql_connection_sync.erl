@@ -41,7 +41,8 @@
             buffer = <<>>,
 			pending_requests,
 			start_interval,
-			proc_index}).
+			proc_index,
+                        trf}).
 
 %%%=================================
 %%% supervisor callbacks
@@ -95,8 +96,7 @@ connecting(discover, State) ->
 	F = ecql_parser:make_query_frame(Query, <<0>>, one,?RES_STREAMID_START),
 	case sock_send(State#state.sock, F) of
 		error ->
-				(?GEN_FSM):send_event_after(State#state.start_interval,connect),
-				{next_state, connecting, do_close(State)};
+				{next_state, connecting, check_send_event(State)};
 		ok ->
 				{next_state, connecting, State}
 	end; 
@@ -114,15 +114,14 @@ connecting(Request, {Who, _Ref}, State) ->
     ?WARNING_MSG("unexpected call ~p from ~p in 'connecting'",[Request, Who]),
     {reply, {error, badarg}, connecting, State}.   
 
-session_established({q, Query, Flags, ConsistencyLevel}, From, State = #state{sock=Sock}) ->
-    ?DEBUG("session sync request ~p ~n",[{q, Query, Flags, ConsistencyLevel, From, State}]),
+session_established({q, Query, Flags, ConsistencyLevel}, From, State) when State#state.trf == undefined->
+    Sock = State#state.sock,
     case queue:len(State#state.pending_requests) of      
         0 when State#state.caller =:= undefined ->  
             F = ecql_parser:make_query_frame(Query, Flags, ConsistencyLevel,0),
             case sock_send(Sock, F) of
                     error ->
-                        (?GEN_FSM):send_event_after(State#state.start_interval,connect),
-                        {reply, {error,sock_error}, connecting, do_close(State)};
+                        {reply, {error,sock_error}, connecting, check_send_event(State)};
                     ok ->
                         {next_state, session_established, State#state{caller=From}}
             end; 
@@ -133,8 +132,12 @@ session_established({q, Query, Flags, ConsistencyLevel}, From, State = #state{so
                 {reply, {error, queue_full}, session_established, State}
     end;
     
+session_established(Request, From, State) when State#state.trf /= undefined ->
+    ?INFO_MSG("Cassandra unexpected call ~p from ~p in 'session_established' reconecting State ~p ~n", [Request, From, State]),   
+   {reply,  {error, reconnecting}, connecting, check_send_event(State)};
+
 session_established(Request, From, State) ->
-   ?INFO_MSG("unexpected call ~p from ~p in 'session_established'", [Request, From]),
+   ?INFO_MSG("Cassandra unexpected call ~p from ~p in 'session_established' State ~p ~n", [Request, From, State]),
     {reply, {error, badarg}, session_established, State}.
 
 %%--------------------------------------------------------------------   
@@ -331,8 +334,7 @@ handle_frame(connecting, #frame{opcode=?OP_AUTH_CHALLENGE, stream=StreadId, body
 	},
 	case sock_send(Sock, CredF) of
 		error ->
-			(?GEN_FSM):send_event_after(State#state.start_interval,connect),
-			{next_state, connecting, do_close(State)};
+			{next_state, connecting, check_send_event(State)};
 		ok ->
 			{next_state, connecting, State}
 	end;
@@ -357,8 +359,7 @@ handle_frame(connecting, #frame{opcode=?OP_AUTHENTICATE, stream=StreadId, body=B
 					},		
 		case sock_send(Sock, CredF) of
 			error ->
-				(?GEN_FSM):send_event_after(State#state.start_interval,connect),
-				{next_state, connecting, do_close(State)};
+				{next_state, connecting, check_send_event(State)};
 			ok ->
 				{next_state, connecting, State}
 		end;
@@ -367,8 +368,7 @@ handle_frame(connecting, #frame{opcode=?OP_ERROR, body=Body}, State = #state{soc
             gen_tcp:close(Sock),    
             ?INFO_MSG("Cassandra connection failed:~n** Reason: ~p~n** "
 		    "Retry after: ~p seconds",  [parse_error_body(Body),  State#state.start_interval div 1000]),
-			(?GEN_FSM):send_event_after(State#state.start_interval, connect),
-            {next_state, connecting, State#state{sock = undefined}};
+	            {next_state, connecting, check_send_event(State)};
 
 %%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%% Message Frames
@@ -386,8 +386,6 @@ handle_frame(_StateName, #frame{opcode=?OP_RESULT, stream = StreamId, body = <<K
             {Metadata, Rest1} = ecql_parser:consume_metadata(Body),
             {NumRows, Rest2}  = ecql_parser:consume_int(Rest1),
             {Rows, _}         = ecql_parser:consume_num_rows(NumRows, Metadata, Rest2),
-			?DEBUG("Data recieved for query metadata: ~p ~n",[Metadata]),
-			?DEBUG("Data recieved for query rows: ~p ~n",[Rows]),
             Reply = {rows, Metadata, Rows},
 			case StreamId of
 				?RES_STREAMID_START ->
@@ -422,8 +420,7 @@ handle_frame(_StateName, #frame{opcode=?OP_RESULT, stream = StreamId, body = <<K
 
 handle_frame(_St, F, State) ->
     ?DEBUG("unhandled frame recieved. is sock erred??? ~p ~n",[F]),
-    (?GEN_FSM):send_event_after(State#state.start_interval, connect),
-    {next_state,connecting,do_close(State)}.
+    {next_state,connecting, check_send_event(State)}.
 
 check_state(StreamId, State) ->
     case StreamId of
@@ -432,11 +429,15 @@ check_state(StreamId, State) ->
 		    {next_state, connecting, State};
 	    ?RES_DISCOVER_STREAMID ->
 		    ?SUP:add_pid(?SYNC, self()),
-			{next_state, session_established,State#state{pending_requests = queue:new()}};
+			case State#state.trf of
+				undefined -> ok;
+				Trf ->
+				   gen_fsm:cancel_timer(Trf)
+			end,
+			{next_state, session_established,State#state{pending_requests = queue:new(), trf = undefined}};
 		_ -> 
 		    ?ERROR_MSG("Stream Id got: ~p ~n for state: ~p ~n", [StreamId, State]),
-			(?GEN_FSM):send_event_after(State#state.start_interval,connect),
-		    {next_state,connecting,do_close(State)}		     
+		    {next_state,connecting, check_send_event(State)}		     
     end.
 
 send_reply(From,Reply) when is_pid(From)->
@@ -458,8 +459,7 @@ check_queue(State) ->
             F = ecql_parser:make_query_frame(Query, Flags, ConsistencyLevel,0),
             case sock_send(State#state.sock, F) of
                     error ->
-                        (?GEN_FSM):send_event_after(State#state.start_interval,connect),
-                        {reply, {error,sock_error}, connecting, do_close(State)};
+                        {reply, {error,sock_error}, connecting, check_send_event(State)};
                     ok ->
                         {next_state, session_established, State#state{caller=From, pending_requests = Q2 }}
             end;
@@ -478,3 +478,12 @@ connect_sock(Server,Port) when is_list(Server) ->
         {nodelay, true}
     ],
     gen_tcp:connect(Server, Port, Opts,?GEN_TCP_CONNECT_TIMEOUT).
+
+check_send_event(State) ->
+	case State#state.trf of
+	   undefined -> 		
+		Ref = (?GEN_FSM):send_event_after(State#state.start_interval,connect),
+		do_close(State#state{trf = Ref});
+	   _ ->
+		do_close(State)
+	end.

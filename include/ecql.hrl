@@ -11,6 +11,7 @@
 -define(RES_DISCOVER_STREAMID,124).
 -define(RES_STREAMID_START,125).
 -define(MAX_TRY, 5).
+-define(MAX_DBQUERY_TRY, 3).
 
 -define(SYNC, sync).
 -define(ASYNC, async).
