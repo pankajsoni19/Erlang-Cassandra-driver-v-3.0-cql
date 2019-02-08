@@ -1,4 +1,4 @@
-Ecql - v2.0
+Ecql - v3.0
 ------------------
 
 This project borrows heavily from erlang-cassandra project here on git. 
